@@ -1,0 +1,395 @@
+From patchwork Fri Feb 15 20:16:49 2019
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Subject: [net,1/5] net: dsa: b53: Fix default VLAN ID
+X-Patchwork-Submitter: Florian Fainelli <f.fainelli@gmail.com>
+X-Patchwork-Id: 1043162
+X-Patchwork-Delegate: davem@davemloft.net
+Message-Id: <20190215201653.20988-2-f.fainelli@gmail.com>
+To: netdev@vger.kernel.org
+Cc: davem@davemloft.net, andrew@lunn.ch, vivien.didelot@gmail.com,
+ Florian Fainelli <f.fainelli@gmail.com>
+Date: Fri, 15 Feb 2019 12:16:49 -0800
+From: Florian Fainelli <f.fainelli@gmail.com>
+List-Id: <netdev.vger.kernel.org>
+
+We were not consistent in how the default VID of a given port was
+defined, b53_br_leave() would make sure the VLAN ID would be either 0/1
+depending on the switch generation, but b53_configure_vlan(), which is
+the default configuration would unconditionally set it to 1. The correct
+value is 1 for 5325/5365 series and 0 otherwise. To avoid repeating that
+mistake ever again, introduce a helper function: b53_default_pvid() to
+factor that out.
+
+Fixes: 967dd82ffc52 ("net: dsa: b53: Add support for Broadcom RoboSwitch")
+Signed-off-by: Florian Fainelli <f.fainelli@gmail.com>
+---
+ drivers/net/dsa/b53/b53_common.c | 29 ++++++++++++++++-------------
+ 1 file changed, 16 insertions(+), 13 deletions(-)
+
+diff --git a/drivers/net/dsa/b53/b53_common.c b/drivers/net/dsa/b53/b53_common.c
+index 0e4bbdcc614f..964a9ec4652a 100644
+--- a/drivers/net/dsa/b53/b53_common.c
++++ b/drivers/net/dsa/b53/b53_common.c
+@@ -632,15 +632,25 @@ static void b53_enable_mib(struct b53_device *dev)
+ 	b53_write8(dev, B53_MGMT_PAGE, B53_GLOBAL_CONFIG, gc);
+ }
+ 
++static u16 b53_default_pvid(struct b53_device *dev)
++{
++	if (is5325(dev) || is5365(dev))
++		return 1;
++	else
++		return 0;
++}
++
+ int b53_configure_vlan(struct dsa_switch *ds)
+ {
+ 	struct b53_device *dev = ds->priv;
+ 	struct b53_vlan vl = { 0 };
+-	int i;
++	int i, def_vid;
++
++	def_vid = b53_default_pvid(dev);
+ 
+ 	/* clear all vlan entries */
+ 	if (is5325(dev) || is5365(dev)) {
+-		for (i = 1; i < dev->num_vlans; i++)
++		for (i = def_vid; i < dev->num_vlans; i++)
+ 			b53_set_vlan_entry(dev, i, &vl);
+ 	} else {
+ 		b53_do_vlan_op(dev, VTA_CMD_CLEAR);
+@@ -650,7 +660,7 @@ int b53_configure_vlan(struct dsa_switch *ds)
+ 
+ 	b53_for_each_port(dev, i)
+ 		b53_write16(dev, B53_VLAN_PAGE,
+-			    B53_VLAN_PORT_DEF_TAG(i), 1);
++			    B53_VLAN_PORT_DEF_TAG(i), def_vid);
+ 
+ 	if (!is5325(dev) && !is5365(dev))
+ 		b53_set_jumbo(dev, dev->enable_jumbo, false);
+@@ -1326,12 +1336,8 @@ int b53_vlan_del(struct dsa_switch *ds, int port,
+ 
+ 		vl->members &= ~BIT(port);
+ 
+-		if (pvid == vid) {
+-			if (is5325(dev) || is5365(dev))
+-				pvid = 1;
+-			else
+-				pvid = 0;
+-		}
++		if (pvid == vid)
++			pvid = b53_default_pvid(dev);
+ 
+ 		if (untagged && !dsa_is_cpu_port(ds, port))
+ 			vl->untag &= ~(BIT(port));
+@@ -1644,10 +1650,7 @@ void b53_br_leave(struct dsa_switch *ds, int port, struct net_device *br)
+ 	b53_write16(dev, B53_PVLAN_PAGE, B53_PVLAN_PORT_MASK(port), pvlan);
+ 	dev->ports[port].vlan_ctl_mask = pvlan;
+ 
+-	if (is5325(dev) || is5365(dev))
+-		pvid = 1;
+-	else
+-		pvid = 0;
++	pvid = b53_default_pvid(dev);
+ 
+ 	/* Make this port join all VLANs without VLAN entries */
+ 	if (is58xx(dev)) {
+
+From patchwork Fri Feb 15 20:16:50 2019
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Subject: [net,2/5] net: dsa: b53: Properly account for VLAN filtering
+X-Patchwork-Submitter: Florian Fainelli <f.fainelli@gmail.com>
+X-Patchwork-Id: 1043163
+X-Patchwork-Delegate: davem@davemloft.net
+Message-Id: <20190215201653.20988-3-f.fainelli@gmail.com>
+To: netdev@vger.kernel.org
+Cc: davem@davemloft.net, andrew@lunn.ch, vivien.didelot@gmail.com,
+ Florian Fainelli <f.fainelli@gmail.com>
+Date: Fri, 15 Feb 2019 12:16:50 -0800
+From: Florian Fainelli <f.fainelli@gmail.com>
+List-Id: <netdev.vger.kernel.org>
+
+VLAN filtering can be built into the kernel, and also dynamically turned
+on/off through the bridge master device. Allow re-configuring the switch
+appropriately to account for that by deciding whether VLAN table
+(v_table) misses should lead to a drop or forward.
+
+Fixes: a2482d2ce349 ("net: dsa: b53: Plug in VLAN support")
+Signed-off-by: Florian Fainelli <f.fainelli@gmail.com>
+---
+ drivers/net/dsa/b53/b53_common.c | 59 +++++++++++++++++++++++++++++---
+ drivers/net/dsa/b53/b53_priv.h   |  3 ++
+ 2 files changed, 57 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/net/dsa/b53/b53_common.c b/drivers/net/dsa/b53/b53_common.c
+index 964a9ec4652a..2fef4c564420 100644
+--- a/drivers/net/dsa/b53/b53_common.c
++++ b/drivers/net/dsa/b53/b53_common.c
+@@ -344,7 +344,8 @@ static void b53_set_forwarding(struct b53_device *dev, int enable)
+ 	b53_write8(dev, B53_CTRL_PAGE, B53_SWITCH_CTRL, mgmt);
+ }
+ 
+-static void b53_enable_vlan(struct b53_device *dev, bool enable)
++static void b53_enable_vlan(struct b53_device *dev, bool enable,
++			    bool enable_filtering)
+ {
+ 	u8 mgmt, vc0, vc1, vc4 = 0, vc5;
+ 
+@@ -369,8 +370,13 @@ static void b53_enable_vlan(struct b53_device *dev, bool enable)
+ 		vc0 |= VC0_VLAN_EN | VC0_VID_CHK_EN | VC0_VID_HASH_VID;
+ 		vc1 |= VC1_RX_MCST_UNTAG_EN | VC1_RX_MCST_FWD_EN;
+ 		vc4 &= ~VC4_ING_VID_CHECK_MASK;
+-		vc4 |= VC4_ING_VID_VIO_DROP << VC4_ING_VID_CHECK_S;
+-		vc5 |= VC5_DROP_VTABLE_MISS;
++		if (enable_filtering) {
++			vc4 |= VC4_ING_VID_VIO_DROP << VC4_ING_VID_CHECK_S;
++			vc5 |= VC5_DROP_VTABLE_MISS;
++		} else {
++			vc4 |= VC4_ING_VID_VIO_FWD << VC4_ING_VID_CHECK_S;
++			vc5 &= ~VC5_DROP_VTABLE_MISS;
++		}
+ 
+ 		if (is5325(dev))
+ 			vc0 &= ~VC0_RESERVED_1;
+@@ -420,6 +426,9 @@ static void b53_enable_vlan(struct b53_device *dev, bool enable)
+ 	}
+ 
+ 	b53_write8(dev, B53_CTRL_PAGE, B53_SWITCH_MODE, mgmt);
++
++	dev->vlan_enabled = enable;
++	dev->vlan_filtering_enabled = enable_filtering;
+ }
+ 
+ static int b53_set_jumbo(struct b53_device *dev, bool enable, bool allow_10_100)
+@@ -656,7 +665,7 @@ int b53_configure_vlan(struct dsa_switch *ds)
+ 		b53_do_vlan_op(dev, VTA_CMD_CLEAR);
+ 	}
+ 
+-	b53_enable_vlan(dev, false);
++	b53_enable_vlan(dev, false, dev->vlan_filtering_enabled);
+ 
+ 	b53_for_each_port(dev, i)
+ 		b53_write16(dev, B53_VLAN_PAGE,
+@@ -1265,6 +1274,46 @@ EXPORT_SYMBOL(b53_phylink_mac_link_up);
+ 
+ int b53_vlan_filtering(struct dsa_switch *ds, int port, bool vlan_filtering)
+ {
++	struct b53_device *dev = ds->priv;
++	struct net_device *bridge_dev;
++	unsigned int i;
++	u16 pvid, new_pvid;
++
++	/* Handle the case were multiple bridges span the same switch device
++	 * and one of them has a different setting than what is being requested
++	 * which would be breaking filtering semantics for any of the other
++	 * bridge devices.
++	 */
++	b53_for_each_port(dev, i) {
++		bridge_dev = dsa_to_port(ds, i)->bridge_dev;
++		if (bridge_dev &&
++		    bridge_dev != dsa_to_port(ds, port)->bridge_dev &&
++		    br_vlan_enabled(bridge_dev) != vlan_filtering) {
++			netdev_err(bridge_dev,
++				   "VLAN filtering is global to the switch!\n");
++			return -EINVAL;
++		}
++	}
++
++	b53_read16(dev, B53_VLAN_PAGE, B53_VLAN_PORT_DEF_TAG(port), &pvid);
++	new_pvid = pvid;
++	if (dev->vlan_filtering_enabled && !vlan_filtering) {
++		/* Filtering is currently enabled, use the default PVID since
++		 * the bridge does not expect tagging anymore
++		 */
++		dev->ports[port].pvid = pvid;
++		new_pvid = b53_default_pvid(dev);
++	} else if (!dev->vlan_filtering_enabled && vlan_filtering) {
++		/* Filtering is currently disabled, restore the previous PVID */
++		new_pvid = dev->ports[port].pvid;
++	}
++
++	if (pvid != new_pvid)
++		b53_write16(dev, B53_VLAN_PAGE, B53_VLAN_PORT_DEF_TAG(port),
++			    new_pvid);
++
++	b53_enable_vlan(dev, dev->vlan_enabled, vlan_filtering);
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL(b53_vlan_filtering);
+@@ -1280,7 +1329,7 @@ int b53_vlan_prepare(struct dsa_switch *ds, int port,
+ 	if (vlan->vid_end > dev->num_vlans)
+ 		return -ERANGE;
+ 
+-	b53_enable_vlan(dev, true);
++	b53_enable_vlan(dev, true, dev->vlan_filtering_enabled);
+ 
+ 	return 0;
+ }
+diff --git a/drivers/net/dsa/b53/b53_priv.h b/drivers/net/dsa/b53/b53_priv.h
+index ec796482792d..4dc7ee38b258 100644
+--- a/drivers/net/dsa/b53/b53_priv.h
++++ b/drivers/net/dsa/b53/b53_priv.h
+@@ -91,6 +91,7 @@ enum {
+ struct b53_port {
+ 	u16		vlan_ctl_mask;
+ 	struct ethtool_eee eee;
++	u16		pvid;
+ };
+ 
+ struct b53_vlan {
+@@ -137,6 +138,8 @@ struct b53_device {
+ 
+ 	unsigned int num_vlans;
+ 	struct b53_vlan *vlans;
++	bool vlan_enabled;
++	bool vlan_filtering_enabled;
+ 	unsigned int num_ports;
+ 	struct b53_port *ports;
+ };
+
+From patchwork Fri Feb 15 20:16:51 2019
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Subject: [net,3/5] net: systemport: Fix reception of BPDUs
+X-Patchwork-Submitter: Florian Fainelli <f.fainelli@gmail.com>
+X-Patchwork-Id: 1043164
+X-Patchwork-Delegate: davem@davemloft.net
+Message-Id: <20190215201653.20988-4-f.fainelli@gmail.com>
+To: netdev@vger.kernel.org
+Cc: davem@davemloft.net, andrew@lunn.ch, vivien.didelot@gmail.com,
+ Florian Fainelli <f.fainelli@gmail.com>
+Date: Fri, 15 Feb 2019 12:16:51 -0800
+From: Florian Fainelli <f.fainelli@gmail.com>
+List-Id: <netdev.vger.kernel.org>
+
+SYSTEMPORT has its RXCHK parser block that attempts to validate the
+packet structures, unfortunately setting the L2 header check bit will
+cause Bridge PDUs (BPDUs) to be incorrectly rejected because they look
+like LLC/SNAP packets with a non-IPv4 or non-IPv6 Ethernet Type.
+
+Fixes: 4e8aedfe78c7 ("net: systemport: Turn on offloads by default")
+Signed-off-by: Florian Fainelli <f.fainelli@gmail.com>
+---
+ drivers/net/ethernet/broadcom/bcmsysport.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/net/ethernet/broadcom/bcmsysport.c b/drivers/net/ethernet/broadcom/bcmsysport.c
+index 28c9b0bdf2f6..bc3ac369cbe3 100644
+--- a/drivers/net/ethernet/broadcom/bcmsysport.c
++++ b/drivers/net/ethernet/broadcom/bcmsysport.c
+@@ -134,6 +134,10 @@ static void bcm_sysport_set_rx_csum(struct net_device *dev,
+ 
+ 	priv->rx_chk_en = !!(wanted & NETIF_F_RXCSUM);
+ 	reg = rxchk_readl(priv, RXCHK_CONTROL);
++	/* Clear L2 header checks, which would prevent BPDUs
++	 * from being received.
++	 */
++	reg &= ~RXCHK_L2_HDR_DIS;
+ 	if (priv->rx_chk_en)
+ 		reg |= RXCHK_EN;
+ 	else
+
+From patchwork Fri Feb 15 20:16:52 2019
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Subject: [net,4/5] net: dsa: bcm_sf2: Do not assume DSA master supports WoL
+X-Patchwork-Submitter: Florian Fainelli <f.fainelli@gmail.com>
+X-Patchwork-Id: 1043165
+X-Patchwork-Delegate: davem@davemloft.net
+Message-Id: <20190215201653.20988-5-f.fainelli@gmail.com>
+To: netdev@vger.kernel.org
+Cc: davem@davemloft.net, andrew@lunn.ch, vivien.didelot@gmail.com,
+ Florian Fainelli <f.fainelli@gmail.com>
+Date: Fri, 15 Feb 2019 12:16:52 -0800
+From: Florian Fainelli <f.fainelli@gmail.com>
+List-Id: <netdev.vger.kernel.org>
+
+We assume in the bcm_sf2 driver that the DSA master network device
+supports ethtool_ops::{get,set}_wol operations, which is not a given.
+Avoid de-referencing potentially non-existent function pointers and
+check them as we should.
+
+Fixes: 96e65d7f3f88 ("net: dsa: bcm_sf2: add support for Wake-on-LAN")
+Signed-off-by: Florian Fainelli <f.fainelli@gmail.com>
+---
+ drivers/net/dsa/bcm_sf2.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/net/dsa/bcm_sf2.c b/drivers/net/dsa/bcm_sf2.c
+index 17ec32b0a1cc..14138d423cf1 100644
+--- a/drivers/net/dsa/bcm_sf2.c
++++ b/drivers/net/dsa/bcm_sf2.c
+@@ -726,10 +726,11 @@ static void bcm_sf2_sw_get_wol(struct dsa_switch *ds, int port,
+ {
+ 	struct net_device *p = ds->ports[port].cpu_dp->master;
+ 	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
+-	struct ethtool_wolinfo pwol;
++	struct ethtool_wolinfo pwol = { };
+ 
+ 	/* Get the parent device WoL settings */
+-	p->ethtool_ops->get_wol(p, &pwol);
++	if (p->ethtool_ops->get_wol)
++		p->ethtool_ops->get_wol(p, &pwol);
+ 
+ 	/* Advertise the parent device supported settings */
+ 	wol->supported = pwol.supported;
+@@ -750,9 +751,10 @@ static int bcm_sf2_sw_set_wol(struct dsa_switch *ds, int port,
+ 	struct net_device *p = ds->ports[port].cpu_dp->master;
+ 	struct bcm_sf2_priv *priv = bcm_sf2_to_priv(ds);
+ 	s8 cpu_port = ds->ports[port].cpu_dp->index;
+-	struct ethtool_wolinfo pwol;
++	struct ethtool_wolinfo pwol =  { };
+ 
+-	p->ethtool_ops->get_wol(p, &pwol);
++	if (p->ethtool_ops->get_wol)
++		p->ethtool_ops->get_wol(p, &pwol);
+ 	if (wol->wolopts & ~pwol.supported)
+ 		return -EINVAL;
+ 
+
+From patchwork Fri Feb 15 20:16:53 2019
+Content-Type: text/plain; charset="utf-8"
+MIME-Version: 1.0
+Content-Transfer-Encoding: 7bit
+Subject: [net,5/5] net: dsa: b53: Do not program CPU port's PVID
+X-Patchwork-Submitter: Florian Fainelli <f.fainelli@gmail.com>
+X-Patchwork-Id: 1043166
+X-Patchwork-Delegate: davem@davemloft.net
+Message-Id: <20190215201653.20988-6-f.fainelli@gmail.com>
+To: netdev@vger.kernel.org
+Cc: davem@davemloft.net, andrew@lunn.ch, vivien.didelot@gmail.com,
+ Florian Fainelli <f.fainelli@gmail.com>
+Date: Fri, 15 Feb 2019 12:16:53 -0800
+From: Florian Fainelli <f.fainelli@gmail.com>
+List-Id: <netdev.vger.kernel.org>
+
+The CPU port is special and does not need to obey VLAN restrictions as
+far as untagged traffic goes, also, having the CPU port be part of a
+particular PVID is against the idea of keeping it tagged in all VLANs.
+
+Fixes: ca8931948344 ("net: dsa: b53: Keep CPU port as tagged in all VLANs")
+Signed-off-by: Florian Fainelli <f.fainelli@gmail.com>
+---
+ drivers/net/dsa/b53/b53_common.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/dsa/b53/b53_common.c b/drivers/net/dsa/b53/b53_common.c
+index 2fef4c564420..c76892ac4e69 100644
+--- a/drivers/net/dsa/b53/b53_common.c
++++ b/drivers/net/dsa/b53/b53_common.c
+@@ -1359,7 +1359,7 @@ void b53_vlan_add(struct dsa_switch *ds, int port,
+ 		b53_fast_age_vlan(dev, vid);
+ 	}
+ 
+-	if (pvid) {
++	if (pvid && !dsa_is_cpu_port(ds, port)) {
+ 		b53_write16(dev, B53_VLAN_PAGE, B53_VLAN_PORT_DEF_TAG(port),
+ 			    vlan->vid_end);
+ 		b53_fast_age_vlan(dev, vid);

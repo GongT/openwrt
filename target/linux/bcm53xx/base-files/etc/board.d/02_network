@@ -75,6 +75,23 @@ netgear,r8500)
 	;;
 esac
 
+case "$board" in
+linksys,panamera)
+        et2macaddr="$(nvram get et2macaddr)"
+
+	ip link set eth2 address $et2macaddr
+	ip link set extsw address $et2macaddr
+	ip link set wan address $et2macaddr
+
+	ucidef_set_interface_lan "lan1 lan2 lan3 lan4 lan5 lan6 lan7 lan8 extsw"
+	ucidef_set_interface_wan "wan"
+
+	board_config_flush
+	
+	exit 0
+	;;
+esac
+
 # NVRAM entries may contain unsorted ports, e.g. Netgear R6250 uses
 # vlan1ports=3 2 1 0 5*
 # vlan2ports=4 5u

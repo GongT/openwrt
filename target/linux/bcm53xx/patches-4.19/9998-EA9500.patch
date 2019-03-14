@@ -1,0 +1,99 @@
+Index: linux-4.19.25/arch/arm/boot/dts/bcm47094-linksys-panamera.dts
+===================================================================
+--- linux-4.19.25.orig/arch/arm/boot/dts/bcm47094-linksys-panamera.dts
++++ linux-4.19.25/arch/arm/boot/dts/bcm47094-linksys-panamera.dts
+@@ -240,6 +240,28 @@
+ 			label = "wan";
+ 		};
+ 
++                port@5 {
++                        reg = <5>;
++                        ethernet = <&gmac0>;
++                        label = "cpu";
++
++                        fixed-link {
++                                speed = <1000>;
++                                full-duplex;
++                        };
++                };
++
++                port@7 {
++                        reg = <7>;
++                        ethernet = <&gmac1>;
++                        label = "cpu";
++
++                        fixed-link {
++                                speed = <1000>;
++                                full-duplex;
++                        };
++                };
++
+ 		port@8 {
+ 			reg = <8>;
+ 			ethernet = <&gmac2>;
+Index: linux-4.19.19/drivers/net/dsa/b53/b53_common.c
+===================================================================
+--- linux-4.19.19.orig/drivers/net/dsa/b53/b53_common.c
++++ linux-4.19.19/drivers/net/dsa/b53/b53_common.c
+@@ -952,6 +952,12 @@ static void b53_adjust_link(struct dsa_s
+ 	if (port == dev->cpu_port) {
+ 		off = B53_PORT_OVERRIDE_CTRL;
+ 		reg = PORT_OVERRIDE_EN;
++		if (is5301x(dev)) {
++			if (port == 8)
++				reg |= PORT_OVERRIDE_SPEED_2000M;
++			else if (port == 5 || port == 7)
++				reg = GMII_PO_EN | GMII_PO_SPEED_2000M;
++		}
+ 	} else {
+ 		off = B53_GMII_PORT_OVERRIDE_CTRL(port);
+ 		reg = GMII_PO_EN;
+@@ -1551,7 +1551,7 @@ enum dsa_tag_protocol b53_get_tag_protocol(struct dsa_switch *ds, int port)
+ 	 * mode to be turned on which means we need to specifically manage ARL
+ 	 * misses on multicast addresses (TBD).
+ 	 */
+-	if (is5325(dev) || is5365(dev) || is539x(dev) || is531x5(dev) ||
++       if (is5325(dev) || is5365(dev) || is539x(dev) ||
+ 	    !b53_can_enable_brcm_tags(ds, port))
+ 		return DSA_TAG_PROTO_NONE;
+ 
+@@ -1894,7 +1877,7 @@ static const struct b53_chip_data b53_sw
+ 		.vlans = 4096,
+ 		.enabled_ports = 0x1bf,
+ 		.arl_entries = 4,
+-		.cpu_port = B53_CPU_PORT_25, /* TODO: auto detect */
++		.cpu_port = B53_CPU_PORT, /* TODO: auto detect */
+ 		.vta_regs = B53_VTA_REGS,
+ 		.duplex_reg = B53_DUPLEX_STAT_GE,
+ 		.jumbo_pm_reg = B53_JUMBO_PORT_MASK,
+Index: linux-4.19.25/net/dsa/dsa2.c
+===================================================================
+--- linux-4.19.25.orig/net/dsa/dsa2.c
++++ linux-4.19.25/net/dsa/dsa2.c
+@@ -200,7 +200,7 @@ static bool dsa_tree_setup_routing_table
+ static struct dsa_port *dsa_tree_find_first_cpu(struct dsa_switch_tree *dst)
+ {
+ 	struct dsa_switch *ds;
+-	struct dsa_port *dp;
++	struct dsa_port *dp = NULL;
+ 	int device, port;
+ 
+ 	for (device = 0; device < DSA_MAX_SWITCHES; device++) {
+@@ -209,14 +209,13 @@ static struct dsa_port *dsa_tree_find_fi
+ 			continue;
+ 
+ 		for (port = 0; port < ds->num_ports; port++) {
+-			dp = &ds->ports[port];
+ 
+-			if (dsa_port_is_cpu(dp))
+-				return dp;
++			if (dsa_port_is_cpu(&ds->ports[port]))
++				dp = &ds->ports[port];
+ 		}
+ 	}
+ 
+-	return NULL;
++	return dp;
+ }
+ 
+ static int dsa_tree_setup_default_cpu(struct dsa_switch_tree *dst)

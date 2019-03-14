@@ -260,7 +260,7 @@ define Device/linksys-ea9500
   DEVICE_PACKAGES := $(BRCMFMAC_4366C0) $(USB3_PACKAGES)
   DEVICE_DTS := bcm47094-linksys-panamera
 endef
-# TARGET_DEVICES += linksys-ea9500
+TARGET_DEVICES += linksys-ea9500
 
 define Device/netgear
   DEVICE_VENDOR := NETGEAR

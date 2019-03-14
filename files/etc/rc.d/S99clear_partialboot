@@ -1,0 +1,19 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=99
+USE_PROCD=1
+
+boot() {
+        nvram set bootpartition=0 && nvram set partialboots=0 && nvram commit
+}
+
+
+start() {
+        nvram set bootpartition=0 && nvram set partialboots=0 && nvram commit
+}
+
+stop() {
+        echo 'Stoping fix_network service'
+}
+
